@@ -1,5 +1,5 @@
 import { CARDS } from './cards.js';
-import { Game, newGameState, COLOR_NAMES } from './engine.js';
+import { Game, newGameState, COLOR_NAMES, cloneState } from './engine.js';
 import { botAnswer } from './bot.js';
 import { Host, Guest } from './net.js';
 import morphdom from './vendor/morphdom.js';
@@ -109,12 +109,32 @@ function hostStartGame() {
   launch(players);
 }
 function launch(players) {
-  const st = newGameState(players);
-  game = new Game(st, { botAnswer, delay: 600, onUpdate: scheduleBroadcast });
+  ui.history = [];
+  startGame(newGameState(players), false);
   ui.screen = 'game'; ui.mySeat = 0;
-  game.run().catch(e => { console.error(e); ui.error = 'Erreur du moteur : ' + e.message; render(); });
+}
+function startGame(st, resume) {
+  game = new Game(st, {
+    botAnswer, delay: 600, onUpdate: scheduleBroadcast,
+    // Solo : une sauvegarde au début de chaque tour, pour pouvoir annuler
+    onChooseStart: ui.role === 'solo' ? (snap) => { ui.history.push(snap); if (ui.history.length > 40) ui.history.shift(); } : null,
+  });
+  const g = game;
+  g.run(resume).catch(e => { if (g.dead) return; console.error(e); ui.error = 'Erreur du moteur : ' + e.message; render(); });
   scheduleBroadcast();
 }
+// Annuler : revient au début du tour précédent (ou du tour en cours si la résolution a commencé)
+function undoTurn() {
+  if (ui.role !== 'solo' || !game) return;
+  const h = ui.history;
+  if (game.s.phase === 'choose') { if (h.length < 2) return; h.pop(); }
+  const snap = h.pop(); if (!snap) return;
+  game.dead = true; game.onUpdate = () => {};
+  snap.log.push(`↩️ Retour au début du tour ${snap.turn} de la manche ${snap.round}.`);
+  ui.sel = null; ui.lastEv = snap.evSeq || 0; ui.multi = [];
+  startGame(cloneState(snap), true);
+}
+function canUndo(v) { return ui.role === 'solo' && v.phase !== 'over' && (v.phase === 'choose' ? ui.history.length >= 2 : ui.history.length >= 1); }
 let bTimer = null;
 function scheduleBroadcast() {
   if (bTimer) return;
@@ -159,6 +179,7 @@ function render() {
     html = gameHTML(ui.view);
   }
   else html = `<div class="center-screen"><p>${esc(ui.status || 'Chargement…')}</p></div>`;
+  if (ui.discardOf != null && ui.view) html += discardHTML(ui.view, ui.discardOf);
   if (ui.zoom) html += zoomHTML(ui.zoom);
   if (ui.rulesOpen) html += rulesHTML();
   html += `<button class="fbfab" data-act="fb" title="Envoyer un commentaire">💬 Commentaire</button>`;
@@ -170,6 +191,56 @@ function render() {
       return !from.isEqualNode(to);
     },
   });
+  if (ui.screen === 'game' && ui.view) animate(ui.view);
+}
+
+// ─────────────────────────── animations ───────────────────────────
+const fxLayer = document.createElement('div'); fxLayer.className = 'fx-layer'; document.body.appendChild(fxLayer);
+const RES_ICON = { F: '⚔️', G: '🪙', P: '⭐' };
+let fxQueue = [], fxTimer = null;
+function animate(v) {
+  const evs = v.events || [];
+  if (ui.lastEv == null) { ui.lastEv = evs.length ? evs[evs.length - 1].id : 0; return; }
+  const fresh = evs.filter(e => e.id > ui.lastEv);
+  if (!fresh.length) return;
+  ui.lastEv = fresh[fresh.length - 1].id;
+  fxQueue.push(...fresh);
+  if (fxQueue.length > 30) fxQueue = fxQueue.slice(-30);
+  if (!fxTimer) pumpFx();
+}
+function pumpFx() {
+  const e = fxQueue.shift();
+  if (!e) { fxTimer = null; return; }
+  playFx(e);
+  fxTimer = setTimeout(pumpFx, fxQueue.length > 10 ? 60 : 140);
+}
+function rectOf(sel) { const el = document.querySelector(sel); if (!el) return null; const r = el.getBoundingClientRect(); return r.width ? r : null; }
+function fxBox(r, cls, html) {
+  const d = document.createElement('div'); d.className = 'fx ' + cls; d.innerHTML = html || '';
+  Object.assign(d.style, { left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+  fxLayer.appendChild(d); setTimeout(() => d.remove(), 1800);
+}
+function playFx(e) {
+  const me = ui.view && ui.view.me;
+  if (e.type === 'res') {
+    // pour soi : au-dessus des statistiques épinglées en haut ; pour les autres : sur leur bandeau
+    const r = rectOf(e.p === me ? '#mystats .r' + e.res : `.stats[data-p="${e.p}"] .r${e.res}`);
+    if (!r) return;
+    const d = document.createElement('div');
+    d.className = 'fx float ' + (e.n > 0 ? 'up' : 'down') + (e.p === me ? ' mine' : '');
+    d.innerHTML = `${e.n > 0 ? '+' : '−'}${Math.abs(e.n)} ${RES_ICON[e.res]}${e.why ? `<small>${esc(e.why)}</small>` : ''}`;
+    d.style.left = (r.left + r.width / 2) + 'px'; d.style.top = (e.p === me ? r.bottom + 4 : r.top) + 'px';
+    fxLayer.appendChild(d); setTimeout(() => d.remove(), 1800);
+    const el = document.querySelector(e.p === me ? '#mystats .r' + e.res : `.stats[data-p="${e.p}"] .r${e.res}`);
+    if (el) { el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump'); }
+  } else if (e.type === 'slot' || e.type === 'placement') {
+    const r = rectOf(`.ship[data-p="${e.p}"] .slot[data-k="${e.slot}"]`);
+    if (r) fxBox(r, e.type === 'slot' ? 'pop' : 'glow');
+  } else if (e.type === 'legend') {
+    const r = rectOf(`.ship[data-p="${e.p}"] .legends`); if (r) fxBox(r, 'glow');
+  } else if (e.type === 'vigie') {
+    const r = rectOf('.central .vigie'); if (r) fxBox(r, 'glow');
+  }
 }
 
 function homeHTML() {
@@ -235,9 +306,9 @@ function statsHTML(p, v) {
   const onV = v.vigie === p.idx;
   const ready = v.phase === 'choose' ? (p.ready ? '<span class="tag ok">prêt</span>' : '<span class="tag wait">réfléchit…</span>') : '';
   const interl = v.phase === 'interlude' ? (p.ready ? '<span class="tag ok">prêt</span>' : '<span class="tag wait">…</span>') : '';
-  return `<div class="stats c-${p.color}">
+  return `<div class="stats c-${p.color}" data-p="${p.idx}">
     <span class="pname"><span class="dot"></span>${esc(p.name)}${p.isBot ? ' 🤖' : ''}${p.idx === v.me ? ' (vous)' : ''}</span>
-    <span title="Pièces d'or">🪙 ${p.gold}</span><span title="Force">⚔️ ${p.force}</span><span title="Points de Gloire">⭐ ${p.pg}</span>
+    <span class="rG" title="Pièces d'or">🪙 ${p.gold}</span><span class="rF" title="Force">⚔️ ${p.force}</span><span class="rP" title="Points de Gloire">⭐ ${p.pg}</span>
     <span title="Cartes en main">🂠 ${Array.isArray(p.hand) ? p.hand.length : p.hand}</span>
     ${onV ? '<span class="tag vig" title="Sur la vigie">🔭 vigie</span>' : ''}${p.eliminated ? '<span class="tag bad">éliminé</span>' : ''}${ready}${interl}
   </div>`;
@@ -250,14 +321,14 @@ function shipHTML(p, v, mine) {
       else inner = cardImg(s.card);
     }
     const hl = ui.hlSlots && mine && ui.hlSlots.includes(k) ? ' hl' : '';
-    return `<div class="slot${hl}" style="left:${SLOT_LEFT[k]}%">${inner}<span class="snum">${k + 1}</span></div>`;
+    return `<div class="slot${hl}" data-k="${k}" style="left:${SLOT_LEFT[k]}%">${inner}<span class="snum">${k + 1}</span></div>`;
   }).join('');
   const top = p.discard && p.discard.length ? p.discard[p.discard.length - 1] : null;
   const legends = p.legends.filter(Boolean).map(l => cardImg(l, 'leg')).join('');
-  return `<div class="ship ${mine ? 'mine' : ''}">
+  return `<div class="ship ${mine ? 'mine' : ''}" data-p="${p.idx}">
     <img class="ship-bg" src="assets/ship.webp" alt="" draggable="false">
     ${slots}
-    <div class="discard" title="Défausse (${p.discardCount})">${top ? cardImg(top, 'dsc') : ''}<span class="dcount">${p.discardCount}</span></div>
+    <div class="discard" data-act="discard" data-p="${p.idx}" title="Voir la défausse (${p.discardCount} cartes)">${top ? cardImg(top, 'dsc') : ''}<span class="dcount">🔍 ${p.discardCount}</span></div>
     <div class="legends">${legends}</div>
   </div>`;
 }
@@ -314,7 +385,8 @@ function handHTML(v) {
   let panel = '';
   if (v.phase === 'choose' && me.ready && me.chosen) {
     const ch = me.chosen;
-    panel = `<div class="mpanel done">Vous jouez ${cardImg(ch.card, 'xs')} <b>${MODE_LABEL[ch.mode]}</b>${ch.slot != null ? ` en position ${ch.slot + 1}` : ''}${ch.legend ? ` : ${esc(C(ch.legend).name)}` : ''}
+    const how = { action: "Vous jouez l'action", pirate: 'Vous recrutez <b>face visible</b>', hidden: 'Vous posez <b>FACE CACHÉE</b>', gold: "Vous défaussez pour de l'or", legend: 'Vous défaussez pour recruter' }[ch.mode];
+    panel = `<div class="mpanel done ${ch.mode === 'hidden' ? 'hiddenpick' : ''}">${how} ${cardImg(ch.card, 'xs')}${ch.slot != null ? ` en position ${ch.slot + 1}` : ''}${ch.legend ? ` : ${esc(C(ch.legend).name)}` : ''}
       <button data-act="unchoose">Changer</button></div>`;
   } else if (choosing && ui.sel != null && me.hand.includes(ui.sel)) panel = modePanel(v, ui.sel);
   return `<div class="hand-wrap"><div class="hand">${cards}</div>${panel}</div>`;
@@ -330,9 +402,9 @@ function modePanel(v, id) {
     h += `<div class="mgroup">${btn(m, `▶️ Jouer l'action`, `coût ${m.cost} or`)}</div>`;
   } else {
     const ups = modes.filter(x => x.mode === 'pirate');
-    if (ups.length) h += `<div class="mgroup"><span class="glabel">Recruter face visible (coût payé maintenant) :</span>${ups.map(m => btn(m, `Position ${m.slot + 1}`, `${m.cost} or${c.place && c.place[m.slot] ? ' · ' + ICON[c.place[m.slot][0]] + iconTxt(c.place[m.slot]) : ''}${me.slots[m.slot] ? ' · remplace' : ''}`)).join('')}</div>`;
+    if (ups.length) h += `<div class="mgroup"><span class="glabel">👁️ Recruter <b>face visible</b> (coût payé maintenant, effets appliqués) :</span>${ups.map(m => btn(m, `👁️ Visible · pos. ${m.slot + 1}`, `${m.cost} or${c.place && c.place[m.slot] ? ' · ' + ICON[c.place[m.slot][0]] + iconTxt(c.place[m.slot]) : ''}${me.slots[m.slot] ? ' · remplace' : ''}`)).join('')}</div>`;
     const hid = modes.filter(x => x.mode === 'hidden');
-    h += `<div class="mgroup"><span class="glabel">Poser face cachée (gratuit ; à payer ou défausser avant le combat) :</span>${hid.map(m => btn(m, `Position ${m.slot + 1}`, me.slots[m.slot] ? 'remplace' : 'vide')).join('')}</div>`;
+    h += `<div class="mgroup"><span class="glabel">🂠 Poser <b>face cachée</b> (gratuit maintenant, aucun effet ; avant le combat : payer pour la révéler ou la défausser contre de l'or) :</span>${hid.map(m => btn(m, `🂠 Cachée · pos. ${m.slot + 1}`, me.slots[m.slot] ? 'remplace un pirate' : 'vide')).join('')}</div>`;
   }
   const g = modes.find(x => x.mode === 'gold');
   h += `<div class="mgroup">${btn(g, `🪙 Défausser pour ${g.gain} or`)}`;
@@ -366,7 +438,8 @@ function gameHTML(v) {
   for (let k = 1; k < v.n; k++) others.push(v.players[(v.me + k) % v.n]);
   const interlude = v.phase === 'interlude' ? `<div class="interlude">${me.ready ? '⏳ En attente des autres joueurs…' : `<button class="big" data-act="cont">Continuer vers la manche ${v.round + 1} ➜</button>`}</div>` : '';
   return `<div class="game">
-    <header class="topbar"><img src="assets/logo.webp" class="mini-logo" alt=""><span class="rtag">Manche ${v.round} · Tour ${Math.max(1, v.turn)}/6</span><div class="phase">${phaseText(v)}</div>
+    <header class="topbar"><img src="assets/logo.webp" class="mini-logo" alt=""><span class="rtag">Manche ${v.round} · Tour ${Math.max(1, v.turn)}/6</span><span id="mystats" class="mystats c-${me.color}" title="Vos ressources"><span class="rG">🪙 ${me.gold}</span><span class="rF">⚔️ ${me.force}</span><span class="rP">⭐ ${me.pg}</span>${v.vigie === me.idx ? '<span>🔭</span>' : ''}</span><div class="phase">${phaseText(v)}</div>
+      ${ui.role === 'solo' ? `<button class="tbtn" data-act="undo" ${canUndo(v) ? '' : 'disabled'} title="Revenir au début du tour précédent">↩️ Annuler</button>` : ''}
       <button class="tbtn" data-act="rules">📜 Règles</button><button class="tbtn" data-act="log">📒 Journal</button></header>
     ${ui.status ? `<div class="banner">${esc(ui.status)}</div>` : ''}
     <div class="layout ${ui.logOpen ? 'withlog' : ''}">
@@ -382,6 +455,15 @@ function gameHTML(v) {
     </div>
     ${promptHTML(v)}${resultHTML(v)}
   </div>`;
+}
+function discardHTML(v, i) {
+  const p = v.players[i];
+  const cards = [...p.discard].reverse();
+  const pir = cards.filter(c => C(c).type !== 'action'), act = cards.filter(c => C(c).type === 'action');
+  const grid = (arr) => arr.length ? `<div class="dgrid">${arr.map(c => cardImg(c)).join('')}</div>` : '<p class="hint">Aucune.</p>';
+  return `<div class="modal"><div class="mbox wide"><button class="close" data-act="undiscard">✕</button>
+    <h3>Défausse de ${esc(p.name)} (${cards.length} cartes, la plus récente en premier)</h3>
+    <h4>Pirates (${pir.length})</h4>${grid(pir)}<h4>Actions (${act.length})</h4>${grid(act)}</div></div>`;
 }
 function fbContext() {
   const parts = [];
@@ -457,7 +539,7 @@ $app.addEventListener('input', (e) => {
 $app.addEventListener('click', (e) => {
   const z = e.target.closest('[data-zoom]');
   const a = e.target.closest('[data-act]');
-  if (a && a.dataset.act === 'sel') { onAct(a, e); return; }
+  if (a && (a.dataset.act === 'sel' || a.dataset.act === 'discard')) { onAct(a, e); return; }
   if (z && !e.target.closest('.popt') && !e.target.closest('.mbtn') && !(a && a.dataset.act === 'unzoom')) { ui.zoom = +z.dataset.zoom; render(); return; }
   if (!a) return;
   if (a.dataset.act === 'unrules' && e.target.closest('[data-stop]') && !e.target.closest('.close')) return;
@@ -490,6 +572,9 @@ function onAct(a) {
       send({ t: 'choose', ch }); ui.sel = null; break;
     }
     case 'unchoose': send({ t: 'unchoose' }); break;
+    case 'undo': undoTurn(); break;
+    case 'discard': ui.discardOf = +a.dataset.p; break;
+    case 'undiscard': ui.discardOf = null; break;
     case 'panswer': send({ t: 'answer', id: v.prompt.id, value: JSON.parse(a.dataset.v) }); ui.multi = []; break;
     case 'ptoggle': { const val = JSON.parse(a.dataset.v); const i = ui.multi.indexOf(val); if (i >= 0) ui.multi.splice(i, 1); else if (ui.multi.length < v.prompt.max) ui.multi.push(val); break; }
     case 'pmulti': send({ t: 'answer', id: v.prompt.id, value: ui.multi }); ui.multi = []; break;
@@ -498,5 +583,5 @@ function onAct(a) {
   }
   render();
 }
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { ui.zoom = null; ui.rulesOpen = false; ui.fb = false; render(); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { ui.zoom = null; ui.rulesOpen = false; ui.fb = false; ui.discardOf = null; render(); } });
 window.addEventListener('beforeunload', (e) => { if (game && ui.role === 'host' && ui.view && ui.view.phase !== 'over') { e.preventDefault(); e.returnValue = ''; } });

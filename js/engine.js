@@ -23,7 +23,7 @@ export function newGameState(players) {
     })),
     pioche: [], legendsAvail: [], fleau: null, fleauHp: 0, fleauDef: 0,
     vigie: null, vigieBroken: false, victoryRule: null,
-    log: [], prompt: null, reveal: null, combat: null, result: null, seq: 0,
+    log: [], events: [], evSeq: 0, prompt: null, reveal: null, combat: null, result: null, seq: 0,
   };
 }
 
@@ -33,6 +33,7 @@ export class Game {
     this.sim = !!opts.sim;
     this.botAnswer = opts.botAnswer;          // (game, playerIdx, prompt) => answer
     this.onUpdate = opts.onUpdate || (() => {});
+    this.onChooseStart = opts.onChooseStart;
     this.delay = opts.delay ?? 0;
     this.waiters = {};                        // réponses humaines en attente
     this.chooseWaiter = null;
@@ -54,7 +55,19 @@ export class Game {
     if (this.s.log.length > 300) this.s.log.shift();
   }
   update() { if (!this.sim) { this.s.seq++; this.onUpdate(); } }
-  async pause(ms) { if (!this.sim && this.delay) { this.update(); await sleep(ms ?? this.delay); } }
+  async pause(ms) {
+    if (this.dead) throw new Error('abandoned');
+    if (!this.sim && this.delay) { this.update(); await sleep(ms ?? this.delay); }
+    if (this.dead) throw new Error('abandoned');
+  }
+  // Événements pour les animations de l'interface
+  ev(o) {
+    if (this.sim) return;
+    const s = this.s; s.evSeq = (s.evSeq || 0) + 1;
+    (s.events ||= []).push({ id: s.evSeq, ...o });
+    if (s.events.length > 60) s.events.shift();
+  }
+  pay(i, n, why) { if (n <= 0) return; this.P(i).gold -= n; this.ev({ type: 'res', p: i, res: 'G', n: -n, why }); }
 
   // Pirates face visible (positions + légendaires)
   faceUp(i) {
@@ -144,36 +157,39 @@ export class Game {
     const bonus = this.count(i, 43) + this.count(i, 81);
     const t = n + bonus;
     this.P(i).force += t; this.P(i).gainedForce = true;
+    this.ev({ type: 'res', p: i, res: 'F', n: t, why });
     this.log(`${this.nm(i)} gagne ${t} Force${why ? ' (' + why + ')' : ''}.`);
   }
   gainPG(i, n, why) {
     if (n <= 0) return;
     const t = n + this.count(i, 81);
     this.P(i).pg += t;
+    this.ev({ type: 'res', p: i, res: 'P', n: t, why });
     this.log(`${this.nm(i)} gagne ${t} PG${why ? ' (' + why + ')' : ''}.`);
   }
   gainGold(i, n, why) {
     if (n <= 0) return;
     this.P(i).gold += n;
+    this.ev({ type: 'res', p: i, res: 'G', n, why });
     this.log(`${this.nm(i)} gagne ${n} or${why ? ' (' + why + ')' : ''}.`);
     if (n >= 3) for (const q of this.neighbors(i)) {
-      const k = this.count(q, 22); if (k) { this.P(q).gold += k; this.log(`${this.nm(q)} gagne ${k} or (Parasite).`); }
+      const k = this.count(q, 22); if (k) { this.P(q).gold += k; this.ev({ type: 'res', p: q, res: 'G', n: k, why: 'Parasite' }); this.log(`${this.nm(q)} gagne ${k} or (Parasite).`); }
     }
   }
   loseForce(i, n, why) {
     const p = this.P(i); const t = Math.min(n, p.force);
     if (t <= 0) return 0;
-    p.force -= t; this.corsaire.add(i);
+    p.force -= t; this.corsaire.add(i); this.ev({ type: 'res', p: i, res: 'F', n: -t, why });
     this.log(`${this.nm(i)} perd ${t} Force${why ? ' (' + why + ')' : ''}.`);
     return t;
   }
   loseGold(i, n, why) {
-    const p = this.P(i); const t = Math.min(n, p.gold); p.gold -= t;
+    const p = this.P(i); const t = Math.min(n, p.gold); p.gold -= t; if (t > 0) this.ev({ type: 'res', p: i, res: 'G', n: -t, why });
     if (t > 0) this.log(`${this.nm(i)} perd ${t} or${why ? ' (' + why + ')' : ''}.`);
     return t;
   }
   losePG(i, n, why) {
-    const p = this.P(i); const t = Math.min(n, p.pg); p.pg -= t;
+    const p = this.P(i); const t = Math.min(n, p.pg); p.pg -= t; if (t > 0) this.ev({ type: 'res', p: i, res: 'P', n: -t, why });
     if (t > 0) this.log(`${this.nm(i)} perd ${t} PG${why ? ' (' + why + ')' : ''}.`);
     return t;
   }
@@ -286,6 +302,7 @@ export class Game {
     if (p.slots[k]) { this.discardSlot(i, k, 'remplacé'); replaced = true; }
     if (replaced) this.replaceTriggers(i);
     p.slots[k] = { card: id, hidden: false };
+    this.ev({ type: 'slot', p: i, slot: k });
     if (played) this.playPirateTriggers(i, id, k, paid);
   }
   playPirateTriggers(i, id, k, paid) {
@@ -309,6 +326,7 @@ export class Game {
       this.log(`${this.nm(i)} défausse ${C(p.legends[k]).name}.`);
     }
     p.legends[k] = L;
+    this.ev({ type: 'legend', p: i });
     this.s.legendsAvail = this.s.legendsAvail.filter(x => x !== L);
     this.log(`${this.nm(i)} recrute le Pirate légendaire ${C(L).name} !`);
   }
@@ -320,6 +338,7 @@ export class Game {
     const amount = v + this.count(i, 45) + 3 * this.count(i, 126);
     const reps = times ?? (this.has(i, 89) ? 2 : 1);
     const nm = C(this.P(owner).slots[k].card).name;
+    this.ev({ type: 'placement', p: owner, slot: k });
     for (let r = 0; r < reps; r++) {
       if (t === 'F') this.gainForce(i, amount, `placement ${nm}`);
       else if (t === 'G') this.gainGold(i, amount, `placement ${nm}`);
@@ -364,7 +383,7 @@ export class Game {
     if (cl.length === 1) {
       const q = cl[0];
       if (this.s.vigie !== q) {
-        this.s.vigie = q; this.log(`${this.nm(q)} grimpe sur la vigie !`);
+        this.s.vigie = q; this.ev({ type: 'vigie', p: q }); this.log(`${this.nm(q)} grimpe sur la vigie !`);
         for (const p of this.s.players) { const k = this.count(p.idx, 125); if (k) this.gainPG(p.idx, 4 * k, 'Benjamin Hornigold'); }
       } else this.log(`${this.nm(q)} est déjà sur la vigie.`);
     } else {
@@ -630,7 +649,7 @@ export class Game {
         const o = ok[sel];
         if (!await this.affect(i, o.q)) break;
         const cost = C(o.card).cost;
-        p.gold -= cost; this.P(o.q).gold += cost;
+        this.pay(i, cost, 'vol de pirate'); this.P(o.q).gold += cost; this.ev({ type: 'res', p: o.q, res: 'G', n: cost, why: 'pirate volé' });
         this.P(o.q).slots[o.k] = null;
         this.log(`${this.nm(i)} vole ${C(o.card).name} à ${this.nm(o.q)} pour ${cost} or.`);
         const k = await this.ask(i, { kind: 'slot-place', card: o.card, title: `Où placer ${C(o.card).name} ?`, options: this.slotOptions(i) });
@@ -738,12 +757,15 @@ export class Game {
   }
 
   // ─────────────────────────── déroulement ───────────────────────────
-  async run() {
-    for (let r = 1; r <= 3; r++) {
-      await this.setupRound(r);
-      for (let t = 1; t <= 6; t++) {
+  // resume = true : reprend une partie sauvegardée au début d'une phase de choix (annulation)
+  async run(resume = false) {
+    let skip = resume;
+    for (let r = resume ? this.s.round : 1; r <= 3; r++) {
+      if (!skip) await this.setupRound(r);
+      for (let t = skip ? this.s.turn : 1; t <= 6; t++) {
         this.s.turn = t;
-        if (t > 1) this.drawStep();
+        if (t > 1 && !skip) this.drawStep();
+        skip = false;
         await this.choosePhase();
         await this.resolveTurn();
         await this.endTurn();
@@ -773,6 +795,7 @@ export class Game {
 
   async choosePhase() {
     const s = this.s; s.phase = 'choose';
+    if (!this.sim && this.onChooseStart) this.onChooseStart(cloneState(s));
     for (const p of s.players) { p.chosen = null; p.ready = false; p.gainedForce = false; }
     this.update();
     await new Promise(res => {
@@ -830,7 +853,7 @@ export class Game {
         const cost = this.pirateCost(i, ch.card, ch.slot);
         if (p.gold < cost) mode = 'gold';
         else {
-          p.gold -= cost;
+          this.pay(i, cost, c.name);
           this.log(`${this.nm(i)} recrute ${c.name} en position ${ch.slot + 1} (${cost} or).`);
           this.putPirate(i, ch.card, ch.slot, { paid: cost });
           pirates.push({ i, card: ch.card, slot: ch.slot });
@@ -839,10 +862,10 @@ export class Game {
       } else if (mode === 'action') {
         const cost = this.actionCost(i, ch.card);
         if (p.gold < cost) mode = 'gold';
-        else { p.gold -= cost; this.log(`${this.nm(i)} joue une Action (${cost} or) : « ${c.text} »`); actions.push({ i, card: ch.card, paid: cost }); }
+        else { this.pay(i, cost, 'Action'); this.log(`${this.nm(i)} joue une Action (${cost} or) : « ${c.text} »`); actions.push({ i, card: ch.card, paid: cost }); }
       } else if (mode === 'hidden') {
         if (p.slots[ch.slot]) { this.discardSlot(i, ch.slot, 'remplacé'); this.replaceTriggers(i); }
-        p.slots[ch.slot] = { card: ch.card, hidden: true };
+        p.slots[ch.slot] = { card: ch.card, hidden: true }; this.ev({ type: 'slot', p: i, slot: ch.slot });
         this.log(`${this.nm(i)} place un pirate face cachée en position ${ch.slot + 1}.`);
       } else if (mode === 'legend') {
         p.discard.push(ch.card);
@@ -851,7 +874,7 @@ export class Game {
           this.log(`${C(ch.legend).name} n'est plus disponible pour ${this.nm(i)}.`);
           this.gainGold(i, this.goldDiscardValue(i), 'défausse');
         } else {
-          p.gold -= cost;
+          this.pay(i, cost, C(ch.legend).name);
           await this.placeLegend(i, ch.legend);
         }
         mode = 'done';
@@ -860,15 +883,14 @@ export class Game {
         p.discard.push(ch.card);
         this.gainGold(i, this.goldDiscardValue(i), 'défausse');
       }
-      await this.pause(150);
+      await this.pause(450);
     }
     // 2. Effets de placement
-    for (const x of pirates) { if (this.P(x.i).slots[x.slot]?.card === x.card) { await this.applyPlacement(x.i, x.slot); this.flush(); } }
-    await this.pause(300);
+    for (const x of pirates) { if (this.P(x.i).slots[x.slot]?.card === x.card) { await this.applyPlacement(x.i, x.slot); this.flush(); await this.pause(450); } }
     // 3. Effets immédiats des pirates
-    for (const x of pirates) if (C(x.card).inst && this.P(x.i).slots[x.slot]?.card === x.card) { await this.pirateEffect(x.i, x.card, x.slot); this.flush(); await this.pause(200); }
+    for (const x of pirates) if (C(x.card).inst && this.P(x.i).slots[x.slot]?.card === x.card) { await this.pirateEffect(x.i, x.card, x.slot); this.flush(); await this.pause(550); }
     // 4. Actions
-    for (const x of actions) { await this.resolveAction(x.i, x.card, { paid: x.paid }); this.flush(); await this.pause(300); }
+    for (const x of actions) { await this.resolveAction(x.i, x.card, { paid: x.paid }); this.flush(); await this.pause(650); }
     this.resolveClimbs();
     this.update();
   }
@@ -922,7 +944,7 @@ export class Game {
         if (ans[0] === 'g') { p.slots[k] = null; p.discard.push(id); this.gainGold(i, this.goldDiscardValue(i), `défausse de ${C(id).name}`); }
         else {
           const cost = this.pirateCost(i, id, k, { reveal: true });
-          p.gold -= cost; p.slots[k] = null;
+          this.pay(i, cost, C(id).name); p.slots[k] = null;
           this.log(`${this.nm(i)} révèle ${C(id).name} (${cost} or).`);
           this.putPirate(i, id, k, { paid: cost });
           await this.applyPlacement(i, k); this.flush();

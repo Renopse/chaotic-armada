@@ -167,3 +167,30 @@ textarea { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px s
 .fbcard { display: flex; align-items: center; gap: 8px; }
 .ztext .mbtn { margin-top: 8px; width: 100%; }
 .hand-row { margin-bottom: 56px; }
+
+/* Ressources épinglées, annulation, défausse */
+.mystats { display: flex; gap: 10px; font-weight: 700; font-size: 1.1rem; background: var(--sea); border: 2px solid var(--c); border-radius: 999px; padding: 2px 12px; white-space: nowrap; }
+.mystats span, .stats .rG, .stats .rF, .stats .rP { display: inline-block; }
+.bump { animation: bump .5s; }
+@keyframes bump { 40% { transform: scale(1.45); color: var(--gold); } }
+.discard { cursor: pointer; }
+.discard:hover .dcount { background: var(--gold); color: var(--ink); }
+.mbox.wide { width: min(980px, 100%); }
+.dgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
+.dgrid .card { width: 100%; }
+.mpanel.done.hiddenpick { border-color: var(--gold); background: #3a2a10; }
+.glabel b { color: var(--gold); }
+
+/* Animations */
+.fx-layer { position: fixed; inset: 0; pointer-events: none; z-index: 45; }
+.fx { position: fixed; pointer-events: none; }
+.fx.float { transform: translate(-50%, 0); font-weight: 800; font-size: 1.25rem; text-shadow: 0 2px 4px #000, 0 0 8px #000; white-space: nowrap; text-align: center; animation: floatup 1.7s ease-out forwards; }
+.fx.float small { display: block; font-size: .72rem; font-weight: 600; color: #fff; opacity: .9; }
+.fx.float.up { color: #7dffb0; } .fx.float.down { color: #ff8a7a; }
+@keyframes floatup { 0% { opacity: 0; transform: translate(-50%, 6px) scale(.8); } 15% { opacity: 1; transform: translate(-50%, -6px) scale(1.1); } 100% { opacity: 0; transform: translate(-50%, -46px) scale(1); } }
+.fx.glow { border-radius: 8px; box-shadow: 0 0 0 3px var(--gold), 0 0 26px 8px var(--gold2); animation: glow 1.4s ease-out forwards; }
+@keyframes glow { 0% { opacity: 0; } 20% { opacity: 1; } 100% { opacity: 0; } }
+.fx.pop { border-radius: 8px; box-shadow: 0 0 0 3px #fff, 0 0 30px 10px #5aa6e8; animation: glow 1.2s ease-out forwards; }
+@media (max-width: 600px) { .mystats { font-size: .95rem; gap: 6px; padding: 2px 8px; } .rtag { display: none; } }
+.fx.float.mine { animation-name: floatdown; }
+@keyframes floatdown { 0% { opacity: 0; transform: translate(-50%, -6px) scale(.8); } 15% { opacity: 1; transform: translate(-50%, 4px) scale(1.15); } 100% { opacity: 0; transform: translate(-50%, 40px) scale(1); } }
