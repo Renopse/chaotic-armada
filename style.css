@@ -158,3 +158,12 @@ main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
   .card.md { width: 80px; }
   .mbtn { min-width: 80px; padding: 5px 8px; }
 }
+
+/* Commentaires */
+.fbfab { position: fixed; right: 14px; bottom: 14px; z-index: 40; background: linear-gradient(#5aa6e8, #2f6fae); color: #fff; border: 0; border-radius: 999px; padding: 10px 16px; font-weight: 700; box-shadow: 0 4px 14px #0009; }
+.mbox.fb { display: flex; flex-direction: column; gap: 10px; }
+.mbox.fb label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
+textarea { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--sea); color: var(--text); width: 100%; resize: vertical; }
+.fbcard { display: flex; align-items: center; gap: 8px; }
+.ztext .mbtn { margin-top: 8px; width: 100%; }
+.hand-row { margin-bottom: 56px; }

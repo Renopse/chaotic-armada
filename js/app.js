@@ -3,6 +3,7 @@ import { Game, newGameState, COLOR_NAMES } from './engine.js';
 import { botAnswer } from './bot.js';
 import { Host, Guest } from './net.js';
 import morphdom from './vendor/morphdom.js';
+import { FEEDBACK, feedbackReady } from './config.js';
 
 const C = (id) => CARDS[id];
 const $app = document.getElementById('app');
@@ -160,10 +161,12 @@ function render() {
   else html = `<div class="center-screen"><p>${esc(ui.status || 'Chargement…')}</p></div>`;
   if (ui.zoom) html += zoomHTML(ui.zoom);
   if (ui.rulesOpen) html += rulesHTML();
+  html += `<button class="fbfab" data-act="fb" title="Envoyer un commentaire">💬 Commentaire</button>`;
+  if (ui.fb) html += feedbackHTML();
   if (ui.error) html += `<div class="toast">${esc(ui.error)}</div>`;
   morphdom($app, `<div id="app">${html}</div>`, {
     onBeforeElUpdated: (from, to) => {
-      if (from === document.activeElement && from.tagName === 'INPUT') return false;
+      if (from === document.activeElement && (from.tagName === 'INPUT' || from.tagName === 'TEXTAREA')) return false;
       return !from.isEqualNode(to);
     },
   });
@@ -380,10 +383,46 @@ function gameHTML(v) {
     ${promptHTML(v)}${resultHTML(v)}
   </div>`;
 }
+function fbContext() {
+  const parts = [];
+  const v = ui.view;
+  if (ui.fbCard) { const c = C(ui.fbCard); parts.push(`Carte n°${c.id} ${c.type === 'action' ? 'Action' : c.name} (manche ${c.round}) : ${c.text}`); }
+  if (ui.screen === 'game' && v) parts.push(`Partie : manche ${v.round}, tour ${v.turn}, phase ${v.phase}, ${v.n} joueurs`);
+  else parts.push(`Écran : ${ui.screen}`);
+  parts.push(`Mode : ${ui.role || 'accueil'}`);
+  parts.push(`Écran ${window.innerWidth}x${window.innerHeight}`);
+  return parts.join(' | ');
+}
+function feedbackHTML() {
+  if (ui.fbSent) return `<div class="modal"><div class="mbox"><button class="close" data-act="fbclose">✕</button><h3>Merci !</h3><p>Votre commentaire a bien été envoyé.</p><button class="big" data-act="fbclose">Fermer</button></div></div>`;
+  return `<div class="modal"><div class="mbox fb"><button class="close" data-act="fbclose">✕</button>
+    <h3>💬 Votre commentaire</h3>
+    <p class="hint">Une règle mal appliquée, un bug, une idée, une carte à équilibrer… Tout est utile !</p>
+    ${ui.fbCard ? `<div class="fbcard">${cardImg(ui.fbCard, 'xs')}<span>À propos de : <b>${esc(C(ui.fbCard).type === 'action' ? 'Action' : C(ui.fbCard).name)}</b></span></div>` : ''}
+    <textarea id="fbtext" rows="6" placeholder="Écrivez ici…">${esc(ui.fbText || '')}</textarea>
+    <label>Votre nom (facultatif)<input id="fbname" maxlength="40" value="${esc(ui.fbName ?? ui.name)}"></label>
+    <p class="hint">Contexte joint automatiquement : ${esc(fbContext())}</p>
+    ${ui.fbErr ? `<p class="status">${esc(ui.fbErr)}</p>` : ''}
+    <button class="big" data-act="fbsend" ${(ui.fbText || '').trim() ? '' : 'disabled'}>Envoyer</button>
+  </div></div>`;
+}
+async function sendFeedback() {
+  const text = (ui.fbText || '').trim(); if (!text) return;
+  if (!feedbackReady()) { ui.fbErr = "Le formulaire de commentaires n'est pas encore configuré."; render(); return; }
+  const body = new URLSearchParams();
+  body.append(FEEDBACK.fields.message, text);
+  if (FEEDBACK.fields.context) body.append(FEEDBACK.fields.context, fbContext());
+  if (FEEDBACK.fields.name) body.append(FEEDBACK.fields.name, ui.fbName ?? ui.name ?? '');
+  try {
+    await fetch(`https://docs.google.com/forms/d/e/${FEEDBACK.formId}/formResponse`, { method: 'POST', mode: 'no-cors', body });
+    ui.fbSent = true; ui.fbText = ''; ui.fbErr = null;
+  } catch (e) { ui.fbErr = "Échec de l'envoi. Vérifiez votre connexion et réessayez."; }
+  render();
+}
 function zoomHTML(id) {
   const c = C(id);
   const extra = c.type === 'fleau' ? `<p>Défense ${c.def} × joueurs · PV ${c.hp} × joueurs</p>` : c.type === 'legend' ? `<p>Coût ${c.cost} or</p>` : `<p>Coût ${c.cost} or${c.type !== 'action' ? ` · Force ${c.force}` : ''}${c.inst ? ' · effet immédiat ⚡' : c.text ? ' · effet permanent' : ''}</p>`;
-  return `<div class="modal" data-act="unzoom"><div class="zoom"><img src="${c.img}" alt=""><div class="ztext"><h3>${esc(c.type === 'action' ? 'Action' : c.name)}</h3><p>${esc(c.text)}</p>${extra}</div></div></div>`;
+  return `<div class="modal" data-act="unzoom"><div class="zoom"><img src="${c.img}" alt=""><div class="ztext"><h3>${esc(c.type === 'action' ? 'Action' : c.name)}</h3><p>${esc(c.text)}</p>${extra}<button class="mbtn" data-act="fbcard" data-id="${id}">💬 Commenter cette carte</button></div></div></div>`;
 }
 function rulesHTML() {
   return `<div class="modal" data-act="unrules"><div class="mbox rules" data-stop="1"><button class="close" data-act="unrules">✕</button>
@@ -410,7 +449,11 @@ function rulesHTML() {
 }
 
 // ─────────────────────────── événements ───────────────────────────
-$app.addEventListener('input', (e) => { if (e.target.id === 'name') { ui.name = e.target.value; store.set('ca-name', ui.name); } });
+$app.addEventListener('input', (e) => {
+  if (e.target.id === 'name') { ui.name = e.target.value; store.set('ca-name', ui.name); }
+  if (e.target.id === 'fbtext') { const was = !!(ui.fbText || '').trim(); ui.fbText = e.target.value; if (was !== !!ui.fbText.trim()) render(); }
+  if (e.target.id === 'fbname') ui.fbName = e.target.value;
+});
 $app.addEventListener('click', (e) => {
   const z = e.target.closest('[data-zoom]');
   const a = e.target.closest('[data-act]');
@@ -430,6 +473,10 @@ function onAct(a) {
     case 'start': hostStartGame(); break;
     case 'copy': { const i = document.getElementById('link'); i.select(); navigator.clipboard?.writeText(i.value).catch(() => {}); a.textContent = 'Copié !'; return; }
     case 'rules': ui.rulesOpen = true; break;
+    case 'fb': ui.fb = true; ui.fbCard = null; ui.fbSent = false; ui.fbErr = null; break;
+    case 'fbcard': ui.fb = true; ui.fbCard = +a.dataset.id; ui.zoom = null; ui.fbSent = false; ui.fbErr = null; break;
+    case 'fbclose': ui.fb = false; ui.fbSent = false; break;
+    case 'fbsend': sendFeedback(); return;
     case 'unrules': ui.rulesOpen = false; break;
     case 'log': ui.logOpen = !ui.logOpen; break;
     case 'zoom': ui.zoom = +a.dataset.id; break;
@@ -451,5 +498,5 @@ function onAct(a) {
   }
   render();
 }
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { ui.zoom = null; ui.rulesOpen = false; render(); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { ui.zoom = null; ui.rulesOpen = false; ui.fb = false; render(); } });
 window.addEventListener('beforeunload', (e) => { if (game && ui.role === 'host' && ui.view && ui.view.phase !== 'over') { e.preventDefault(); e.returnValue = ''; } });
